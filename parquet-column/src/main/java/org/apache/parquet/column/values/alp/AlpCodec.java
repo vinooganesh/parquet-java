@@ -101,19 +101,45 @@ final class AlpCodec {
     return Float.floatToRawIntBits(value) == FLOAT_NEGATIVE_ZERO_BITS;
   }
 
-  /** Full exception check for a given (exponent, factor): intrinsic cases plus round-trip failure. */
-  static boolean isFloatException(float value, int exponent, int factor) {
+  /**
+   * Encodes {@code value} and reports whether it is an exception, doing the scaling and rounding
+   * once and leaving the outcome in {@code out}.
+   *
+   * <p>Callers that need both the flag and the encoded value should use this rather than
+   * {@link #isFloatException} followed by {@link #encodeFloat}: the exception check has to encode
+   * the value to test the round trip, so the pair encodes twice. The scaled intermediate is reused
+   * here too, so the two multiplies are also only done once. The expression and its order match
+   * {@link #encodeFloat} exactly, which matters for cross-implementation bit compatibility.
+   */
+  static void tryEncodeFloat(float value, int exponent, int factor, EncodeResult out) {
     if (isIntrinsicFloatException(value)) {
-      return true;
+      out.isException = true;
+      return;
     }
     // Check before rounding: overflow or non-finite after scaling
     float scaled = value * FLOAT_POW10[exponent] * FLOAT_POW10_NEGATIVE[factor];
     if (!Float.isFinite(scaled) || scaled > FLOAT_ENCODING_UPPER_LIMIT || scaled < FLOAT_ENCODING_LOWER_LIMIT) {
-      return true;
+      out.isException = true;
+      return;
     }
-    int encoded = encodeFloat(value, exponent, factor);
+    int encoded = fastRoundFloat(scaled);
     float decoded = decodeFloat(encoded, exponent, factor);
-    return Float.floatToRawIntBits(value) != Float.floatToRawIntBits(decoded);
+    if (Float.floatToRawIntBits(value) != Float.floatToRawIntBits(decoded)) {
+      out.isException = true;
+      return;
+    }
+    out.encoded = encoded;
+    out.isException = false;
+  }
+
+  /**
+   * Full exception check for a given (exponent, factor): intrinsic cases plus round-trip failure.
+   * Prefer {@link #tryEncodeFloat} when the encoded value is wanted as well.
+   */
+  static boolean isFloatException(float value, int exponent, int factor) {
+    EncodeResult result = new EncodeResult();
+    tryEncodeFloat(value, exponent, factor, result);
+    return result.isException;
   }
 
   /** Round float to nearest integer using magic-number trick with sign branching. */
@@ -144,19 +170,39 @@ final class AlpCodec {
     return Double.doubleToRawLongBits(value) == DOUBLE_NEGATIVE_ZERO_BITS;
   }
 
-  /** Full exception check for a given (exponent, factor): intrinsic cases plus round-trip failure. */
-  static boolean isDoubleException(double value, int exponent, int factor) {
+  /**
+   * Encodes {@code value} and reports whether it is an exception, doing the scaling and rounding
+   * once and leaving the outcome in {@code out}. See {@link #tryEncodeFloat} for why this exists.
+   */
+  static void tryEncodeDouble(double value, int exponent, int factor, EncodeResult out) {
     if (isIntrinsicDoubleException(value)) {
-      return true;
+      out.isException = true;
+      return;
     }
     // Check before rounding: overflow or non-finite after scaling
     double scaled = value * DOUBLE_POW10[exponent] * DOUBLE_POW10_NEGATIVE[factor];
     if (!Double.isFinite(scaled) || scaled > ENCODING_UPPER_LIMIT || scaled < ENCODING_LOWER_LIMIT) {
-      return true;
+      out.isException = true;
+      return;
     }
-    long encoded = encodeDouble(value, exponent, factor);
+    long encoded = fastRoundDouble(scaled);
     double decoded = decodeDouble(encoded, exponent, factor);
-    return Double.doubleToRawLongBits(value) != Double.doubleToRawLongBits(decoded);
+    if (Double.doubleToRawLongBits(value) != Double.doubleToRawLongBits(decoded)) {
+      out.isException = true;
+      return;
+    }
+    out.encoded = encoded;
+    out.isException = false;
+  }
+
+  /**
+   * Full exception check for a given (exponent, factor): intrinsic cases plus round-trip failure.
+   * Prefer {@link #tryEncodeDouble} when the encoded value is wanted as well.
+   */
+  static boolean isDoubleException(double value, int exponent, int factor) {
+    EncodeResult result = new EncodeResult();
+    tryEncodeDouble(value, exponent, factor, result);
+    return result.isException;
   }
 
   /** Round double to nearest integer using magic-number trick with sign branching. */
@@ -174,6 +220,19 @@ final class AlpCodec {
 
   static double decodeDouble(long encoded, int exponent, int factor) {
     return encoded * DOUBLE_POW10[factor] * DOUBLE_POW10_NEGATIVE[exponent];
+  }
+
+  /**
+   * Outcome of a single {@link #tryEncodeFloat} or {@link #tryEncodeDouble} call. Mutable and
+   * meant to be reused by the caller so the per-value hot path allocates nothing; an Optional or a
+   * freshly allocated result here would box on every value. Not thread safe, so each writer keeps
+   * its own.
+   */
+  static final class EncodeResult {
+    /** The encoded value, meaningful only when {@link #isException} is false. */
+    long encoded;
+
+    boolean isException;
   }
 
   public static class EncodingParams {
@@ -237,6 +296,8 @@ final class AlpCodec {
     int bestExceptions = length;
     long bestEstimatedSize = Long.MAX_VALUE;
 
+    // One reusable result for the whole search: every value below is encoded exactly once.
+    EncodeResult result = new EncodeResult();
     for (int[] pair : pairs) {
       int e = pair[E];
       int f = pair[F];
@@ -244,11 +305,11 @@ final class AlpCodec {
       int minEncoded = Integer.MAX_VALUE;
       int maxEncoded = Integer.MIN_VALUE;
       for (int i = 0; i < length; i++) {
-        float value = values[offset + i];
-        if (isFloatException(value, e, f)) {
+        tryEncodeFloat(values[offset + i], e, f, result);
+        if (result.isException) {
           exceptions++;
         } else {
-          int encoded = encodeFloat(value, e, f);
+          int encoded = (int) result.encoded;
           if (encoded < minEncoded) minEncoded = encoded;
           if (encoded > maxEncoded) maxEncoded = encoded;
         }
@@ -293,6 +354,8 @@ final class AlpCodec {
     int bestExceptions = length;
     long bestEstimatedSize = Long.MAX_VALUE;
 
+    // One reusable result for the whole search: every value below is encoded exactly once.
+    EncodeResult result = new EncodeResult();
     for (int[] pair : pairs) {
       int e = pair[E];
       int f = pair[F];
@@ -300,11 +363,11 @@ final class AlpCodec {
       long minEncoded = Long.MAX_VALUE;
       long maxEncoded = Long.MIN_VALUE;
       for (int i = 0; i < length; i++) {
-        double value = values[offset + i];
-        if (isDoubleException(value, e, f)) {
+        tryEncodeDouble(values[offset + i], e, f, result);
+        if (result.isException) {
           exceptions++;
         } else {
-          long encoded = encodeDouble(value, e, f);
+          long encoded = result.encoded;
           if (encoded < minEncoded) minEncoded = encoded;
           if (encoded > maxEncoded) maxEncoded = encoded;
         }

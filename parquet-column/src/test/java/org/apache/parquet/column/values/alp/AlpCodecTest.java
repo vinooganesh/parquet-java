@@ -359,4 +359,79 @@ public class AlpCodecTest {
     assertThat(params.factor).isEqualTo(0);
     assertThat(params.numExceptions).isEqualTo(0);
   }
+
+  /**
+   * tryEncode computes the exception flag and the encoded value in one pass, reusing the scaled
+   * intermediate. It must agree exactly with the older isException-then-encode pair it replaced,
+   * including the raw bits of the encoding, since those bytes go on the wire.
+   */
+  @Test
+  public void testTryEncodeMatchesSeparateExceptionCheckAndEncode() {
+    float[] floats = {
+      0.0f,
+      -0.0f,
+      1.0f,
+      -1.0f,
+      0.01f,
+      1234.56f,
+      1e-8f,
+      1e9f,
+      Float.MIN_VALUE,
+      Float.MAX_VALUE,
+      Float.NaN,
+      Float.POSITIVE_INFINITY,
+      Float.NEGATIVE_INFINITY,
+      3.14159f,
+      -273.15f
+    };
+    AlpCodec.EncodeResult result = new AlpCodec.EncodeResult();
+    for (float value : floats) {
+      for (int e = 0; e <= AlpConstants.FLOAT_MAX_EXPONENT; e++) {
+        for (int f = 0; f <= e; f++) {
+          AlpCodec.tryEncodeFloat(value, e, f, result);
+          assertThat(result.isException)
+              .as("float exception flag for %s at e=%s f=%s", value, e, f)
+              .isEqualTo(AlpCodec.isFloatException(value, e, f));
+          if (!result.isException) {
+            assertThat((int) result.encoded)
+                .as("float encoding for %s at e=%s f=%s", value, e, f)
+                .isEqualTo(AlpCodec.encodeFloat(value, e, f));
+          }
+        }
+      }
+    }
+
+    double[] doubles = {
+      0.0,
+      -0.0,
+      1.0,
+      -1.0,
+      0.01,
+      1234.56,
+      1e-15,
+      1e17,
+      Double.MIN_VALUE,
+      Double.MAX_VALUE,
+      Double.NaN,
+      Double.POSITIVE_INFINITY,
+      Double.NEGATIVE_INFINITY,
+      Math.PI,
+      -273.15
+    };
+    for (double value : doubles) {
+      for (int e = 0; e <= AlpConstants.DOUBLE_MAX_EXPONENT; e++) {
+        for (int f = 0; f <= e; f++) {
+          AlpCodec.tryEncodeDouble(value, e, f, result);
+          assertThat(result.isException)
+              .as("double exception flag for %s at e=%s f=%s", value, e, f)
+              .isEqualTo(AlpCodec.isDoubleException(value, e, f));
+          if (!result.isException) {
+            assertThat(result.encoded)
+                .as("double encoding for %s at e=%s f=%s", value, e, f)
+                .isEqualTo(AlpCodec.encodeDouble(value, e, f));
+          }
+        }
+      }
+    }
+  }
 }

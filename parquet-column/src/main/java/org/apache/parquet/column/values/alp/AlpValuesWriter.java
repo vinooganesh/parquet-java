@@ -119,6 +119,8 @@ public abstract class AlpValuesWriter extends ValuesWriter {
     private final byte[] metadataBuf;
     private final byte[] packBuf;
     private final int[] packPadBuf;
+    // Reused across values so the encode hot path allocates nothing.
+    private final AlpCodec.EncodeResult encodeResult = new AlpCodec.EncodeResult();
 
     public FloatAlpValuesWriter(int initialCapacity, int pageSize, ByteBufferAllocator allocator) {
       this(initialCapacity, pageSize, allocator, DEFAULT_VECTOR_SIZE);
@@ -179,30 +181,38 @@ public abstract class AlpValuesWriter extends ValuesWriter {
 
       int excIdx = 0;
 
+      // Encode every value exactly once, recording which ones are exceptions as we go. Calling
+      // isFloatException and then encodeFloat would encode each value twice, because the exception
+      // check has to encode the value in order to test the round trip.
+      int placeholder = 0;
+      boolean havePlaceholder = false;
+      for (int i = 0; i < vectorLen; i++) {
+        AlpCodec.tryEncodeFloat(vectorBuffer[i], params.exponent, params.factor, encodeResult);
+        if (encodeResult.isException) {
+          excPosBuffer[excIdx] = (short) i;
+          excValBuffer[excIdx] = vectorBuffer[i];
+          excIdx++;
+        } else {
+          encodedBuffer[i] = (int) encodeResult.encoded;
+          if (!havePlaceholder) {
+            placeholder = encodedBuffer[i];
+            havePlaceholder = true;
+          }
+        }
+      }
+
       // Exception slots still occupy one position each in the packed integer array, but their real
       // value lives in the exception block. Fill those slots with a placeholder encoding: the first
       // non-exception value's encoding if one exists, otherwise 0 when the whole vector is exceptions.
       // Reusing an encoding already present in the vector avoids introducing a spurious minimum
       // (e.g. 0) that would distort the FOR base and bit width. The reader overwrites exception slots
       // from the exception payload, so the placeholder only affects FOR/bit width, not decoded values.
-      int placeholder = 0;
-      for (int i = 0; i < vectorLen; i++) {
-        if (!AlpCodec.isFloatException(vectorBuffer[i], params.exponent, params.factor)) {
-          placeholder = AlpCodec.encodeFloat(vectorBuffer[i], params.exponent, params.factor);
-          break;
-        }
+      for (int k = 0; k < excIdx; k++) {
+        encodedBuffer[excPosBuffer[k] & 0xFFFF] = placeholder;
       }
 
       int minValue = Integer.MAX_VALUE;
       for (int i = 0; i < vectorLen; i++) {
-        if (AlpCodec.isFloatException(vectorBuffer[i], params.exponent, params.factor)) {
-          excPosBuffer[excIdx] = (short) i;
-          excValBuffer[excIdx] = vectorBuffer[i];
-          excIdx++;
-          encodedBuffer[i] = placeholder;
-        } else {
-          encodedBuffer[i] = AlpCodec.encodeFloat(vectorBuffer[i], params.exponent, params.factor);
-        }
         if (encodedBuffer[i] < minValue) {
           minValue = encodedBuffer[i];
         }
@@ -413,6 +423,8 @@ public abstract class AlpValuesWriter extends ValuesWriter {
     private final byte[] metadataBuf;
     private final byte[] packBuf;
     private final long[] packPadBuf;
+    // Reused across values so the encode hot path allocates nothing.
+    private final AlpCodec.EncodeResult encodeResult = new AlpCodec.EncodeResult();
 
     public DoubleAlpValuesWriter(int initialCapacity, int pageSize, ByteBufferAllocator allocator) {
       this(initialCapacity, pageSize, allocator, DEFAULT_VECTOR_SIZE);
@@ -469,30 +481,38 @@ public abstract class AlpValuesWriter extends ValuesWriter {
 
       int excIdx = 0;
 
+      // Encode every value exactly once, recording which ones are exceptions as we go. Calling
+      // isDoubleException and then encodeDouble would encode each value twice, because the exception
+      // check has to encode the value in order to test the round trip.
+      long placeholder = 0;
+      boolean havePlaceholder = false;
+      for (int i = 0; i < vectorLen; i++) {
+        AlpCodec.tryEncodeDouble(vectorBuffer[i], params.exponent, params.factor, encodeResult);
+        if (encodeResult.isException) {
+          excPosBuffer[excIdx] = (short) i;
+          excValBuffer[excIdx] = vectorBuffer[i];
+          excIdx++;
+        } else {
+          encodedBuffer[i] = encodeResult.encoded;
+          if (!havePlaceholder) {
+            placeholder = encodedBuffer[i];
+            havePlaceholder = true;
+          }
+        }
+      }
+
       // Exception slots still occupy one position each in the packed long array, but their real
       // value lives in the exception block. Fill those slots with a placeholder encoding: the first
       // non-exception value's encoding if one exists, otherwise 0 when the whole vector is exceptions.
       // Reusing an encoding already present in the vector avoids introducing a spurious minimum
       // (e.g. 0) that would distort the FOR base and bit width. The reader overwrites exception slots
       // from the exception payload, so the placeholder only affects FOR/bit width, not decoded values.
-      long placeholder = 0;
-      for (int i = 0; i < vectorLen; i++) {
-        if (!AlpCodec.isDoubleException(vectorBuffer[i], params.exponent, params.factor)) {
-          placeholder = AlpCodec.encodeDouble(vectorBuffer[i], params.exponent, params.factor);
-          break;
-        }
+      for (int k = 0; k < excIdx; k++) {
+        encodedBuffer[excPosBuffer[k] & 0xFFFF] = placeholder;
       }
 
       long minValue = Long.MAX_VALUE;
       for (int i = 0; i < vectorLen; i++) {
-        if (AlpCodec.isDoubleException(vectorBuffer[i], params.exponent, params.factor)) {
-          excPosBuffer[excIdx] = (short) i;
-          excValBuffer[excIdx] = vectorBuffer[i];
-          excIdx++;
-          encodedBuffer[i] = placeholder;
-        } else {
-          encodedBuffer[i] = AlpCodec.encodeDouble(vectorBuffer[i], params.exponent, params.factor);
-        }
         if (encodedBuffer[i] < minValue) {
           minValue = encodedBuffer[i];
         }
